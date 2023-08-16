@@ -11,27 +11,17 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef _FLATTENING_INCLUDES_
-#define _FLATTENING_INCLUDES_
+#ifndef LLVM_OBFUSCATION_FLATTENING_H
+#define LLVM_OBFUSCATION_FLATTENING_H
 
-// LLVM include
-#include "llvm/ADT/Statistic.h"
-#include "llvm/CryptoUtils.h"
-#include "llvm/IR/Function.h"
-#include "llvm/IR/Module.h"
-#include "llvm/Pass.h"
-#include "llvm/Support/CommandLine.h"
-#include "llvm/Transforms/IPO.h"
-#include "llvm/Transforms/Obfuscation/Utils.h"
-#include "llvm/Transforms/Scalar.h"
-#include "llvm/Transforms/Utils/Local.h" // For DemoteRegToStack and DemotePHIToStack
-
-// Namespace
-using namespace std;
+#include "llvm/IR/PassManager.h"
 
 namespace llvm {
-Pass *createFlattening();
-Pass *createFlattening(bool flag);
+class FlatteningPass : public PassInfoMixin<FlatteningPass> {
+public:
+  PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM);
+  static bool isRequired() { return true; }
+};
 } // namespace llvm
 
 #endif

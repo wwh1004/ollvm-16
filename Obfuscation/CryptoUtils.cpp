@@ -17,10 +17,11 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "llvm/CryptoUtils.h"
+#include "CryptoUtils.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/IR/LLVMContext.h"
+#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/ManagedStatic.h"
@@ -49,6 +50,9 @@ using namespace llvm;
 namespace llvm {
 ManagedStatic<CryptoUtils> cryptoutils;
 }
+
+static cl::opt<std::string> AesSeed("aesSeed", cl::init(""),
+                                    cl::desc("seed for the AES-CTR PRNG"));
 
 const uint32_t AES_RCON[10] = {
     0x01000000UL, 0x02000000UL, 0x04000000UL, 0x08000000UL, 0x10000000UL,
@@ -495,7 +499,15 @@ const uint32_t masks[32] = {
     0x00000040UL, 0x00000020UL, 0x00000010UL, 0x00000008UL, 0x00000004UL,
     0x00000002UL, 0x00000001UL};
 
-CryptoUtils::CryptoUtils() { seeded = false; }
+CryptoUtils::CryptoUtils() {
+  seeded = false;
+  // Initialization of the global cryptographically
+  // secure pseudo-random generator
+  if (!AesSeed.empty()) {
+    if (!prng_seed(AesSeed.c_str()))
+      exit(1);
+  }
+}
 
 unsigned CryptoUtils::scramble32(const unsigned in, const char key[16]) {
   assert(key != NULL && "CryptoUtils::scramble key=NULL");
@@ -610,38 +622,91 @@ void CryptoUtils::populate_pool() {
   idx = 0;
 }
 
+#if defined(_WIN64) || defined(_WIN32)
+// sic! don't change include order
+#include <windows.h>
+#include <wincrypt.h>
+
+struct WinDevRandom {
+  WinDevRandom() : m_hcryptProv{0}, m_last_read{0} {
+    assert(!m_hcryptProv);
+    if (!CryptAcquireContext(&m_hcryptProv, nullptr, nullptr, PROV_RSA_FULL,
+                             CRYPT_VERIFYCONTEXT)) {
+      errs() << "CryptAcquireContext failed (LastError: " << GetLastError()
+             << ")\n";
+    } else {
+      assert(m_hcryptProv);
+    }
+  }
+
+  ~WinDevRandom() { close(); }
+
+  std::size_t read(char *key, std::size_t sz) {
+    assert(m_hcryptProv);
+    if (!CryptGenRandom(m_hcryptProv, sz, reinterpret_cast<BYTE *>(key))) {
+      errs() << "CryptGenRandom failed (LastError: " << GetLastError() << ")\n";
+    }
+    m_last_read = sz;
+    return sz;
+  }
+
+  void close() {
+    if (m_hcryptProv && !CryptReleaseContext(m_hcryptProv, 0)) {
+      errs() << "CryptReleaseContext failed (LastError: " << GetLastError()
+             << ")\n";
+    }
+    m_hcryptProv = 0;
+    assert(!m_hcryptProv);
+  }
+
+  std::size_t gcount() { return m_last_read; }
+
+  explicit operator bool() { return true; }
+
+  bool good() const { return m_hcryptProv; }
+
+private:
+  HCRYPTPROV m_hcryptProv;
+  std::size_t m_last_read;
+};
+#endif
+
 bool CryptoUtils::prng_seed() {
 
 #if defined(__linux__)
-  std::ifstream devrandom("/dev/urandom");
+  std::string const dev = "/dev/urandom";
+  std::ifstream devrandom(dev);
+#elif defined(_WIN64) || defined(_WIN32)
+  std::string const dev = "CryptGenRandom";
+  WinDevRandom devrandom;
 #else
-  std::ifstream devrandom("/dev/random");
+  std::string const dev = "/dev/random";
+  std::ifstream devrandom(dev);
 #endif
 
-  if (devrandom) {
-
-    devrandom.read(key, 16);
-
-    if (devrandom.gcount() != 16) {
-      errs() << "Cannot read enough bytes in /dev/random\n";
-      return false;
-    }
-
-    devrandom.close();
-    DEBUG_WITH_TYPE("cryptoutils",
-                    dbgs() << "cryptoutils seeded with /dev/random\n");
-
-    memset(ctr, 0, 16);
-
-    // Once the seed is there, we compute the
-    // AES128 key-schedule
-    aes_compute_ks(ks, key);
-
-    seeded = true;
-  } else {
-    errs() << "Cannot open /dev/random\n";
+  if (!devrandom.good()) {
+    errs() << "Cannot open " << dev << "\n";
     return false;
   }
+
+  devrandom.read(key, 16);
+  auto const gc = devrandom.gcount();
+  if (gc != 16) {
+    errs() << "Cannot read enough bytes got=" << gc << " want=16";
+    return false;
+  }
+
+  devrandom.close();
+  DEBUG_WITH_TYPE("cryptoutils",
+                  dbgs() << "cryptoutils seeded with " << dev << "\n");
+
+  std::memset(ctr, 0, 16);
+
+  // Once the seed is there, we compute the
+  // AES128 key-schedule
+  aes_compute_ks(ks, key);
+
+  seeded = true;
   return true;
 }
 

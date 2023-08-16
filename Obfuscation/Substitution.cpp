@@ -12,26 +12,25 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "llvm/Transforms/Obfuscation/Substitution.h"
+#include "Substitution.h"
+#include "CryptoUtils.h"
+#include "Utils.h"
+#include "llvm/ADT/Statistic.h"
+#include "llvm/IR/Constants.h"
+#include "llvm/IR/Function.h"
+#include "llvm/IR/Instructions.h"
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/Module.h"
+#include "llvm/Pass.h"
+#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/Transforms/Obfuscation/Utils.h"
+#include "llvm/Transforms/IPO.h"
+
+using namespace llvm;
 
 #define DEBUG_TYPE "substitution"
 
-#define NUMBER_ADD_SUBST 4
-#define NUMBER_SUB_SUBST 3
-#define NUMBER_AND_SUBST 2
-#define NUMBER_OR_SUBST 2
-#define NUMBER_XOR_SUBST 2
-
-static cl::opt<int>
-    ObfTimes("sub_loop",
-             cl::desc("Choose how many time the -sub pass loops on a function"),
-             cl::value_desc("number of times"), cl::init(1), cl::Optional);
-
-// Stats
 STATISTIC(Add, "Add substitued");
 STATISTIC(Sub, "Sub substitued");
 // STATISTIC(Mul,  "Mul substitued");
@@ -43,84 +42,53 @@ STATISTIC(Or, "Or substitued");
 STATISTIC(Xor, "Xor substitued");
 
 namespace {
+cl::opt<bool> Substitution("sub", cl::init(false),
+                           cl::desc("Enable instruction substitutions"));
 
-struct Substitution : public FunctionPass {
-  static char ID; // Pass identification, replacement for typeid
-  void (Substitution::*funcAdd[NUMBER_ADD_SUBST])(BinaryOperator *bo);
-  void (Substitution::*funcSub[NUMBER_SUB_SUBST])(BinaryOperator *bo);
-  void (Substitution::*funcAnd[NUMBER_AND_SUBST])(BinaryOperator *bo);
-  void (Substitution::*funcOr[NUMBER_OR_SUBST])(BinaryOperator *bo);
-  void (Substitution::*funcXor[NUMBER_XOR_SUBST])(BinaryOperator *bo);
-  bool flag;
+cl::opt<int>
+    ObfTimes("sub_loop",
+             cl::desc("Choose how many time the -sub pass loops on a function"),
+             cl::value_desc("number of times"), cl::init(1), cl::Optional);
 
-  Substitution() : FunctionPass(ID) {}
+bool runOnFunction(Function &F);
+bool substitute(Function *f);
 
-  Substitution(bool flag) : FunctionPass(ID) {
-    this->flag = flag;
-    funcAdd[0] = &Substitution::addNeg;
-    funcAdd[1] = &Substitution::addDoubleNeg;
-    funcAdd[2] = &Substitution::addRand;
-    funcAdd[3] = &Substitution::addRand2;
+void addNeg(BinaryOperator *bo);
+void addDoubleNeg(BinaryOperator *bo);
+void addRand(BinaryOperator *bo);
+void addRand2(BinaryOperator *bo);
 
-    funcSub[0] = &Substitution::subNeg;
-    funcSub[1] = &Substitution::subRand;
-    funcSub[2] = &Substitution::subRand2;
+void subNeg(BinaryOperator *bo);
+void subRand(BinaryOperator *bo);
+void subRand2(BinaryOperator *bo);
 
-    funcAnd[0] = &Substitution::andSubstitution;
-    funcAnd[1] = &Substitution::andSubstitutionRand;
+void andSubstitution(BinaryOperator *bo);
+void andSubstitutionRand(BinaryOperator *bo);
 
-    funcOr[0] = &Substitution::orSubstitution;
-    funcOr[1] = &Substitution::orSubstitutionRand;
+void orSubstitution(BinaryOperator *bo);
+void orSubstitutionRand(BinaryOperator *bo);
 
-    funcXor[0] = &Substitution::xorSubstitution;
-    funcXor[1] = &Substitution::xorSubstitutionRand;
-  }
+void xorSubstitution(BinaryOperator *bo);
+void xorSubstitutionRand(BinaryOperator *bo);
 
-  bool runOnFunction(Function &F);
-  bool substitute(Function *f);
+#define NUMBER_ADD_SUBST 4
+#define NUMBER_SUB_SUBST 3
+#define NUMBER_AND_SUBST 2
+#define NUMBER_OR_SUBST 2
+#define NUMBER_XOR_SUBST 2
 
-  void addNeg(BinaryOperator *bo);
-  void addDoubleNeg(BinaryOperator *bo);
-  void addRand(BinaryOperator *bo);
-  void addRand2(BinaryOperator *bo);
+void (*funcAdd[NUMBER_ADD_SUBST])(BinaryOperator *bo) = {&addNeg, &addDoubleNeg,
+                                                         &addRand, &addRand2};
+void (*funcSub[NUMBER_SUB_SUBST])(BinaryOperator *bo) = {&subNeg, &subRand,
+                                                         &subRand2};
+void (*funcAnd[NUMBER_AND_SUBST])(BinaryOperator *bo) = {&andSubstitution,
+                                                         &andSubstitutionRand};
+void (*funcOr[NUMBER_OR_SUBST])(BinaryOperator *bo) = {&orSubstitution,
+                                                       &orSubstitutionRand};
+void (*funcXor[NUMBER_XOR_SUBST])(BinaryOperator *bo) = {&xorSubstitution,
+                                                         &xorSubstitutionRand};
 
-  void subNeg(BinaryOperator *bo);
-  void subRand(BinaryOperator *bo);
-  void subRand2(BinaryOperator *bo);
-
-  void andSubstitution(BinaryOperator *bo);
-  void andSubstitutionRand(BinaryOperator *bo);
-
-  void orSubstitution(BinaryOperator *bo);
-  void orSubstitutionRand(BinaryOperator *bo);
-
-  void xorSubstitution(BinaryOperator *bo);
-  void xorSubstitutionRand(BinaryOperator *bo);
-};
-} // namespace
-
-char Substitution::ID = 0;
-static RegisterPass<Substitution> X("substitution", "operators substitution");
-Pass *llvm::createSubstitution(bool flag) { return new Substitution(flag); }
-
-bool Substitution::runOnFunction(Function &F) {
-  // Check if the percentage is correct
-  if (ObfTimes <= 0) {
-    errs() << "Substitution application number -sub_loop=x must be x > 0";
-    return false;
-  }
-
-  Function *tmp = &F;
-  // Do we obfuscate
-  if (toObfuscate(flag, tmp, "sub")) {
-    substitute(tmp);
-    return true;
-  }
-
-  return false;
-}
-
-bool Substitution::substitute(Function *f) {
+bool substitute(Function *f) {
   Function *tmp = f;
 
   // Loop for the number of time we run the pass on the function
@@ -133,14 +101,14 @@ bool Substitution::substitute(Function *f) {
           case BinaryOperator::Add:
             // case BinaryOperator::FAdd:
             // Substitute with random add operation
-            (this->*funcAdd[llvm::cryptoutils->get_range(NUMBER_ADD_SUBST)])(
+            (funcAdd[llvm::cryptoutils->get_range(NUMBER_ADD_SUBST)])(
                 cast<BinaryOperator>(inst));
             ++Add;
             break;
           case BinaryOperator::Sub:
             // case BinaryOperator::FSub:
             // Substitute with random sub operation
-            (this->*funcSub[llvm::cryptoutils->get_range(NUMBER_SUB_SUBST)])(
+            (funcSub[llvm::cryptoutils->get_range(NUMBER_SUB_SUBST)])(
                 cast<BinaryOperator>(inst));
             ++Sub;
             break;
@@ -168,17 +136,17 @@ bool Substitution::substitute(Function *f) {
             //++Shi;
             break;
           case Instruction::And:
-            (this->*funcAnd[llvm::cryptoutils->get_range(2)])(
+            (funcAnd[llvm::cryptoutils->get_range(2)])(
                 cast<BinaryOperator>(inst));
             ++And;
             break;
           case Instruction::Or:
-            (this->*funcOr[llvm::cryptoutils->get_range(2)])(
+            (funcOr[llvm::cryptoutils->get_range(2)])(
                 cast<BinaryOperator>(inst));
             ++Or;
             break;
           case Instruction::Xor:
-            (this->*funcXor[llvm::cryptoutils->get_range(2)])(
+            (funcXor[llvm::cryptoutils->get_range(2)])(
                 cast<BinaryOperator>(inst));
             ++Xor;
             break;
@@ -193,7 +161,7 @@ bool Substitution::substitute(Function *f) {
 }
 
 // Implementation of a = b - (-c)
-void Substitution::addNeg(BinaryOperator *bo) {
+void addNeg(BinaryOperator *bo) {
   BinaryOperator *op = NULL;
 
   // Create sub
@@ -215,8 +183,8 @@ void Substitution::addNeg(BinaryOperator *bo) {
 }
 
 // Implementation of a = -(-b + (-c))
-void Substitution::addDoubleNeg(BinaryOperator *bo) {
-  BinaryOperator *op, *op2 = NULL;
+void addDoubleNeg(BinaryOperator *bo) {
+  Instruction *op, *op2 = NULL;
 
   if (bo->getOpcode() == Instruction::Add) {
     op = BinaryOperator::CreateNeg(bo->getOperand(0), "", bo);
@@ -228,17 +196,17 @@ void Substitution::addDoubleNeg(BinaryOperator *bo) {
     // op->setHasNoSignedWrap(bo->hasNoSignedWrap());
     // op->setHasNoUnsignedWrap(bo->hasNoUnsignedWrap());
   } else {
-    op = BinaryOperator::CreateFNeg(bo->getOperand(0), "", bo);
-    op2 = BinaryOperator::CreateFNeg(bo->getOperand(1), "", bo);
+    op = UnaryOperator::CreateFNeg(bo->getOperand(0), "", bo);
+    op2 = UnaryOperator::CreateFNeg(bo->getOperand(1), "", bo);
     op = BinaryOperator::Create(Instruction::FAdd, op, op2, "", bo);
-    op = BinaryOperator::CreateFNeg(op, "", bo);
+    op = UnaryOperator::CreateFNeg(op, "", bo);
   }
 
   bo->replaceAllUsesWith(op);
 }
 
 // Implementation of  r = rand (); a = b + r; a = a + c; a = a - r
-void Substitution::addRand(BinaryOperator *bo) {
+void addRand(BinaryOperator *bo) {
   BinaryOperator *op = NULL;
 
   if (bo->getOpcode() == Instruction::Add) {
@@ -268,7 +236,7 @@ void Substitution::addRand(BinaryOperator *bo) {
 }
 
 // Implementation of r = rand (); a = b - r; a = a + b; a = a + r
-void Substitution::addRand2(BinaryOperator *bo) {
+void addRand2(BinaryOperator *bo) {
   BinaryOperator *op = NULL;
 
   if (bo->getOpcode() == Instruction::Add) {
@@ -298,8 +266,8 @@ void Substitution::addRand2(BinaryOperator *bo) {
 }
 
 // Implementation of a = b + (-c)
-void Substitution::subNeg(BinaryOperator *bo) {
-  BinaryOperator *op = NULL;
+void subNeg(BinaryOperator *bo) {
+  Instruction *op = NULL;
 
   if (bo->getOpcode() == Instruction::Sub) {
     op = BinaryOperator::CreateNeg(bo->getOperand(1), "", bo);
@@ -310,7 +278,7 @@ void Substitution::subNeg(BinaryOperator *bo) {
     // op->setHasNoSignedWrap(bo->hasNoSignedWrap());
     // op->setHasNoUnsignedWrap(bo->hasNoUnsignedWrap());
   } else {
-    op = BinaryOperator::CreateFNeg(bo->getOperand(1), "", bo);
+    op = UnaryOperator::CreateFNeg(bo->getOperand(1), "", bo);
     op = BinaryOperator::Create(Instruction::FAdd, bo->getOperand(0), op, "",
                                 bo);
   }
@@ -319,7 +287,7 @@ void Substitution::subNeg(BinaryOperator *bo) {
 }
 
 // Implementation of  r = rand (); a = b + r; a = a - c; a = a - r
-void Substitution::subRand(BinaryOperator *bo) {
+void subRand(BinaryOperator *bo) {
   BinaryOperator *op = NULL;
 
   if (bo->getOpcode() == Instruction::Sub) {
@@ -349,7 +317,7 @@ void Substitution::subRand(BinaryOperator *bo) {
 }
 
 // Implementation of  r = rand (); a = b - r; a = a - c; a = a + r
-void Substitution::subRand2(BinaryOperator *bo) {
+void subRand2(BinaryOperator *bo) {
   BinaryOperator *op = NULL;
 
   if (bo->getOpcode() == Instruction::Sub) {
@@ -379,7 +347,7 @@ void Substitution::subRand2(BinaryOperator *bo) {
 }
 
 // Implementation of a = b & c => a = (b^~c)& b
-void Substitution::andSubstitution(BinaryOperator *bo) {
+void andSubstitution(BinaryOperator *bo) {
   BinaryOperator *op = NULL;
 
   // Create NOT on second operand => ~c
@@ -395,7 +363,7 @@ void Substitution::andSubstitution(BinaryOperator *bo) {
 }
 
 // Implementation of a = a && b <=> !(!a | !b) && (r | !r)
-void Substitution::andSubstitutionRand(BinaryOperator *bo) {
+void andSubstitutionRand(BinaryOperator *bo) {
   // Copy of the BinaryOperator type to create the random number with the
   // same type of the operands
   Type *ty = bo->getType();
@@ -431,7 +399,7 @@ void Substitution::andSubstitutionRand(BinaryOperator *bo) {
 }
 
 // Implementation of a = b | c => a = (b & c) | (b ^ c)
-void Substitution::orSubstitutionRand(BinaryOperator *bo) {
+void orSubstitutionRand(BinaryOperator *bo) {
 
   Type *ty = bo->getType();
   ConstantInt *co =
@@ -489,7 +457,7 @@ void Substitution::orSubstitutionRand(BinaryOperator *bo) {
   bo->replaceAllUsesWith(op);
 }
 
-void Substitution::orSubstitution(BinaryOperator *bo) {
+void orSubstitution(BinaryOperator *bo) {
   BinaryOperator *op = NULL;
 
   // Creating first operand (b & c)
@@ -506,7 +474,7 @@ void Substitution::orSubstitution(BinaryOperator *bo) {
 }
 
 // Implementation of a = a ~ b => a = (!a && b) || (a && !b)
-void Substitution::xorSubstitution(BinaryOperator *bo) {
+void xorSubstitution(BinaryOperator *bo) {
   BinaryOperator *op = NULL;
 
   // Create NOT on first operand
@@ -533,7 +501,7 @@ void Substitution::xorSubstitution(BinaryOperator *bo) {
 // implementation of a = a ^ b <=> (a ^ r) ^ (b ^ r) <=> (!a && r || a && !r) ^
 // (!b && r || b && !r)
 // note : r is a random number
-void Substitution::xorSubstitutionRand(BinaryOperator *bo) {
+void xorSubstitutionRand(BinaryOperator *bo) {
   BinaryOperator *op = NULL;
 
   Type *ty = bo->getType();
@@ -572,4 +540,22 @@ void Substitution::xorSubstitutionRand(BinaryOperator *bo) {
   // (!a && r) || (a && !r) ^ (!b && r) || (b && !r)
   op = BinaryOperator::Create(Instruction::Xor, op, op1, "", bo);
   bo->replaceAllUsesWith(op);
+}
+} // namespace
+
+PreservedAnalyses SubstitutionPass::run(Function &F,
+                                        FunctionAnalysisManager &AM) {
+  // Check if the percentage is correct
+  if (ObfTimes <= 0) {
+    errs() << "Substitution application number -sub_loop=x must be x > 0";
+    return PreservedAnalyses::all();
+  }
+
+  // Do we obfuscate
+  if (toObfuscate(Substitution, &F, "sub")) {
+    substitute(&F);
+    return PreservedAnalyses::none();
+  }
+
+  return PreservedAnalyses::all();
 }

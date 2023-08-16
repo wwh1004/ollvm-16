@@ -11,23 +11,17 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef _SPLIT_INCLUDES_
-#define _SPLIT_INCLUDES_
+#ifndef LLVM_OBFUSCATION_SPLITBASICBLOCK_H
+#define LLVM_OBFUSCATION_SPLITBASICBLOCK_H
 
-// LLVM include
-#include "llvm/ADT/Statistic.h"
-#include "llvm/CryptoUtils.h"
-#include "llvm/IR/BasicBlock.h"
-#include "llvm/IR/Module.h"
-#include "llvm/Pass.h"
-#include "llvm/Support/CommandLine.h"
-#include "llvm/Transforms/IPO.h"
-#include "llvm/Transforms/Obfuscation/Utils.h"
-#include "llvm/Transforms/Scalar.h"
-#include "llvm/Transforms/Utils/Local.h" // For DemoteRegToStack and DemotePHIToStack
+#include "llvm/IR/PassManager.h"
 
-// Namespace
 namespace llvm {
-Pass *createSplitBasicBlock(bool flag);
-}
+class SplitBasicBlockPass : public PassInfoMixin<SplitBasicBlockPass> {
+public:
+  PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM);
+  static bool isRequired() { return true; }
+};
+} // namespace llvm
+
 #endif

@@ -1,5 +1,5 @@
 //===- SubstitutionIncludes.h - Substitution Obfuscation
-//pass-------------------------===//
+// pass-------------------------===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -12,26 +12,18 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef _SUBSTITUTIONS_H_
-#define _SUBSTITUTIONS_H_
 
-// LLVM include
-#include "llvm/ADT/Statistic.h"
-#include "llvm/CryptoUtils.h"
-#include "llvm/IR/Function.h"
-#include "llvm/IR/Instructions.h"
-#include "llvm/IR/Module.h"
-#include "llvm/Pass.h"
-#include "llvm/Support/CommandLine.h"
-#include "llvm/Transforms/IPO.h"
+#ifndef LLVM_OBFUSCATION_SUBSTITUTION_H
+#define LLVM_OBFUSCATION_SUBSTITUTION_H
 
-// Namespace
-using namespace llvm;
-using namespace std;
+#include "llvm/IR/PassManager.h"
 
 namespace llvm {
-Pass *createSubstitution();
-Pass *createSubstitution(bool flag);
+class SubstitutionPass : public PassInfoMixin<SubstitutionPass> {
+public:
+  PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM);
+  static bool isRequired() { return true; }
+};
 } // namespace llvm
 
 #endif

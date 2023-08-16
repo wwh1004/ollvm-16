@@ -11,47 +11,84 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "llvm/Transforms/Obfuscation/Flattening.h"
-#include "llvm/CryptoUtils.h"
+#include "Flattening.h"
+#include "CryptoUtils.h"
+#include "Utils.h"
+#include "llvm/ADT/Statistic.h"
+#include "llvm/IR/Constants.h"
+#include "llvm/IR/Function.h"
+#include "llvm/IR/Instructions.h"
+#include "llvm/IR/Module.h"
+#include "llvm/Pass.h"
+#include "llvm/Support/CommandLine.h"
+#include "llvm/Transforms/IPO.h"
 #include "llvm/Transforms/Scalar.h"
+#include "llvm/Transforms/Utils/Local.h" // For DemoteRegToStack and DemotePHIToStack
+#include "llvm/Transforms/Utils/LowerSwitch.h"
+
+using namespace llvm;
+using namespace std;
 
 #define DEBUG_TYPE "flattening"
 
-using namespace llvm;
-
-// Stats
 STATISTIC(Flattened, "Functions flattened");
 
 namespace {
-struct Flattening : public FunctionPass {
-  static char ID; // Pass identification, replacement for typeid
-  bool flag;
+cl::opt<bool> Flattening("fla", cl::init(false),
+                         cl::desc("Enable the flattening pass"));
 
-  Flattening() : FunctionPass(ID) {}
-  Flattening(bool flag) : FunctionPass(ID) { this->flag = flag; }
+// Shamefully borrowed from ../Scalar/RegToMem.cpp :(
+bool valueEscapes(const Instruction &Inst) {
+  if (!Inst.getType()->isSized())
+    return false;
 
-  bool runOnFunction(Function &F);
-  bool flatten(Function *f);
-};
-} // namespace
-
-char Flattening::ID = 0;
-static RegisterPass<Flattening> X("flattening", "Call graph flattening");
-Pass *llvm::createFlattening(bool flag) { return new Flattening(flag); }
-
-bool Flattening::runOnFunction(Function &F) {
-  Function *tmp = &F;
-  // Do we obfuscate
-  if (toObfuscate(flag, tmp, "fla")) {
-    if (flatten(tmp)) {
-      ++Flattened;
-    }
+  const BasicBlock *BB = Inst.getParent();
+  for (const User *U : Inst.users()) {
+    const Instruction *UI = cast<Instruction>(U);
+    if (UI->getParent() != BB || isa<PHINode>(UI))
+      return true;
   }
-
   return false;
 }
 
-bool Flattening::flatten(Function *f) {
+void fixStack(Function &F) {
+  // Try to remove phi node and demote reg to stack
+  std::vector<PHINode *> tmpPhi;
+  std::vector<Instruction *> tmpReg;
+  BasicBlock *bbEntry = &*F.begin();
+
+  do {
+    tmpPhi.clear();
+    tmpReg.clear();
+
+    for (Function::iterator i = F.begin(); i != F.end(); ++i) {
+
+      for (BasicBlock::iterator j = i->begin(); j != i->end(); ++j) {
+
+        if (isa<PHINode>(j)) {
+          PHINode *phi = cast<PHINode>(j);
+          tmpPhi.push_back(phi);
+          continue;
+        }
+        if (!(isa<AllocaInst>(j) && j->getParent() == bbEntry) &&
+            (valueEscapes(*j) || j->isUsedOutsideOfBlock(&*i))) {
+          tmpReg.push_back(&*j);
+          continue;
+        }
+      }
+    }
+    for (unsigned int i = 0; i != tmpReg.size(); ++i) {
+      DemoteRegToStack(*tmpReg.at(i), F.begin()->getTerminator());
+    }
+
+    for (unsigned int i = 0; i != tmpPhi.size(); ++i) {
+      DemotePHIToStack(tmpPhi.at(i), F.begin()->getTerminator());
+    }
+
+  } while (tmpReg.size() != 0 || tmpPhi.size() != 0);
+}
+
+bool flatten(Function &F) {
   vector<BasicBlock *> origBB;
   BasicBlock *loopEntry;
   BasicBlock *loopEnd;
@@ -64,12 +101,8 @@ bool Flattening::flatten(Function *f) {
   llvm::cryptoutils->get_bytes(scrambling_key, 16);
   // END OF SCRAMBLER
 
-  // Lower switch
-  FunctionPass *lower = createLowerSwitchPass();
-  lower->runOnFunction(*f);
-
   // Save all original BB
-  for (Function::iterator i = f->begin(); i != f->end(); ++i) {
+  for (Function::iterator i = F.begin(); i != F.end(); ++i) {
     BasicBlock *tmp = &*i;
     origBB.push_back(tmp);
 
@@ -88,7 +121,7 @@ bool Flattening::flatten(Function *f) {
   origBB.erase(origBB.begin());
 
   // Get a pointer on the first BB
-  Function::iterator tmp = f->begin(); //++tmp;
+  Function::iterator tmp = F.begin(); //++tmp;
   BasicBlock *insert = &*tmp;
 
   // If main begin with an if
@@ -113,19 +146,18 @@ bool Flattening::flatten(Function *f) {
   // Remove jump
   insert->getTerminator()->eraseFromParent();
 
+  Type *I32Ty = Type::getInt32Ty(F.getContext());
   // Create switch variable and set as it
-  switchVar =
-      new AllocaInst(Type::getInt32Ty(f->getContext()), 0, "switchVar", insert);
+  switchVar = new AllocaInst(I32Ty, 0, "switchVar", insert);
   new StoreInst(
-      ConstantInt::get(Type::getInt32Ty(f->getContext()),
-                       llvm::cryptoutils->scramble32(0, scrambling_key)),
+      ConstantInt::get(I32Ty, llvm::cryptoutils->scramble32(0, scrambling_key)),
       switchVar, insert);
 
   // Create main loop
-  loopEntry = BasicBlock::Create(f->getContext(), "loopEntry", f, insert);
-  loopEnd = BasicBlock::Create(f->getContext(), "loopEnd", f, insert);
+  loopEntry = BasicBlock::Create(F.getContext(), "loopEntry", &F, insert);
+  loopEnd = BasicBlock::Create(F.getContext(), "loopEnd", &F, insert);
 
-  load = new LoadInst(switchVar, "switchVar", loopEntry);
+  load = new LoadInst(I32Ty, switchVar, "switchVar", loopEntry);
 
   // Move first BB on top
   insert->moveBefore(loopEntry);
@@ -135,17 +167,17 @@ bool Flattening::flatten(Function *f) {
   BranchInst::Create(loopEntry, loopEnd);
 
   BasicBlock *swDefault =
-      BasicBlock::Create(f->getContext(), "switchDefault", f, loopEnd);
+      BasicBlock::Create(F.getContext(), "switchDefault", &F, loopEnd);
   BranchInst::Create(loopEnd, swDefault);
 
   // Create switch instruction itself and set condition
-  switchI = SwitchInst::Create(&*f->begin(), swDefault, 0, loopEntry);
+  switchI = SwitchInst::Create(&*F.begin(), swDefault, 0, loopEntry);
   switchI->setCondition(load);
 
   // Remove branch jump from 1st BB and make a jump to the while
-  f->begin()->getTerminator()->eraseFromParent();
+  F.begin()->getTerminator()->eraseFromParent();
 
-  BranchInst::Create(loopEntry, &*f->begin());
+  BranchInst::Create(loopEntry, &*F.begin());
 
   // Put all BB in the switch
   for (vector<BasicBlock *>::iterator b = origBB.begin(); b != origBB.end();
@@ -236,7 +268,24 @@ bool Flattening::flatten(Function *f) {
     }
   }
 
-  fixStack(f);
+  fixStack(F);
 
   return true;
+}
+} // namespace
+
+PreservedAnalyses FlatteningPass::run(Function &F,
+                                      FunctionAnalysisManager &AM) {
+  if (toObfuscate(Flattening, &F, "fla")) {
+
+    // Lower switch
+    LowerSwitchPass lower;
+    lower.run(F, AM);
+
+    if (flatten(F)) {
+      ++Flattened;
+    }
+    return PreservedAnalyses::none();
+  }
+  return PreservedAnalyses::all();
 }
