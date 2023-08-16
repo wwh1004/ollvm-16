@@ -12,8 +12,8 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/Transforms/Obfuscation/Flattening.h"
-#include "llvm/Transforms/Scalar.h"
 #include "llvm/CryptoUtils.h"
+#include "llvm/Transforms/Scalar.h"
 
 #define DEBUG_TYPE "flattening"
 
@@ -24,7 +24,7 @@ STATISTIC(Flattened, "Functions flattened");
 
 namespace {
 struct Flattening : public FunctionPass {
-  static char ID;  // Pass identification, replacement for typeid
+  static char ID; // Pass identification, replacement for typeid
   bool flag;
 
   Flattening() : FunctionPass(ID) {}
@@ -33,7 +33,7 @@ struct Flattening : public FunctionPass {
   bool runOnFunction(Function &F);
   bool flatten(Function *f);
 };
-}
+} // namespace
 
 char Flattening::ID = 0;
 static RegisterPass<Flattening> X("flattening", "Call graph flattening");
@@ -88,7 +88,7 @@ bool Flattening::flatten(Function *f) {
   origBB.erase(origBB.begin());
 
   // Get a pointer on the first BB
-  Function::iterator tmp = f->begin();  //++tmp;
+  Function::iterator tmp = f->begin(); //++tmp;
   BasicBlock *insert = &*tmp;
 
   // If main begin with an if
@@ -100,7 +100,7 @@ bool Flattening::flatten(Function *f) {
   if ((br != NULL && br->isConditional()) ||
       insert->getTerminator()->getNumSuccessors() > 1) {
     BasicBlock::iterator i = insert->end();
-	--i;
+    --i;
 
     if (insert->size() > 1) {
       --i;
