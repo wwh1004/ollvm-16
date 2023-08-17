@@ -258,8 +258,9 @@ void addBogusFlow(BasicBlock *basicBlock, Function &F) {
     i1 = (BasicBlock::iterator)basicBlock->getFirstNonPHIOrDbgOrLifetime();
   if (basicBlock->getFirstNonPHI()->isEHPad())
     return;
-  // Fix Verifier.cpp: "mismatched subprogram between llvm.dbg.value label and
-  // !dbg attachment"
+  // Fix Verifier.cpp: "CatchPadInst not the first non-PHI instruction in the
+  // block.", "The unwind destination does not have an exception handling
+  // instruction!"
   Twine *var;
   var = new Twine("originalBB");
   BasicBlock *originalBB = basicBlock->splitBasicBlock(i1, *var);
@@ -394,9 +395,8 @@ BasicBlock *createAlteredBasicBlock(BasicBlock *basicBlock, const Twine &Name,
     if (isa<DbgInfoIntrinsic>(Instr))
       Instr->eraseFromParent();
   }
-  // Fix Verifier.cpp: "CatchPadInst not the first non-PHI instruction in the
-  // block.", "The unwind destination does not have an exception handling
-  // instruction!"
+  // Fix Verifier.cpp: "mismatched subprogram between llvm.dbg.value label and
+  // !dbg attachment"
 
   DEBUG_WITH_TYPE("gen", errs()
                              << "bcf: The cloned basic block is now correct\n");
